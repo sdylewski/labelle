@@ -15,6 +15,9 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QMenu,
+    QMessageBox,
+    QToolButton,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -121,6 +124,78 @@ def _set_spin(spin: QSpinBox, value: Any) -> None:
         pass
 
 
+# (menu label, text to insert, cursor steps back from end, needs math mode)
+MATH_TEMPLATES: list[tuple[str, str, int, bool]] = [
+    ("x²   Squared", "^2", 0, True),
+    ("x³   Cubed", "^3", 0, True),
+    ("xⁿ   Power…", "^{}", 1, True),
+    ("x₂   Subscript…", "_{}", 1, True),
+    ("√x   Square root…", r"\sqrt{}", 1, True),
+    ("∛x   Nth root…", r"\sqrt[3]{}", 1, True),
+    ("a⁄b   Fraction…", r"\frac{}{}", 3, True),
+]
+
+MATH_SYMBOL_GROUPS: list[tuple[str, str]] = [
+    ("Operators", "± ∓ × ÷ · − √ ∛ ∜ ∑ ∏ ∫ ∬ ∮ ∂ ∇ ∞ ∘"),
+    ("Relations", "= ≠ ≈ ≡ ∼ ∝ < > ≤ ≥ ≪ ≫"),
+    ("Greek", "α β γ δ ε ζ η θ ι κ λ μ ν ξ π ρ σ τ υ φ χ ψ ω Γ Δ Θ Λ Ξ Π Σ Φ Ψ Ω"),
+    ("Super/subscripts", "⁰ ¹ ² ³ ⁴ ⁵ ⁶ ⁷ ⁸ ⁹ ⁺ ⁻ ⁿ ₀ ₁ ₂ ₃ ₄ ₅ ₆ ₇ ₈ ₉ ₊ ₋"),
+    ("Fractions", "½ ⅓ ⅔ ¼ ¾ ⅕ ⅛ ⅜ ⅝ ⅞ ‰ %"),
+    ("Arrows", "→ ← ↔ ⇒ ⇐ ⇔ ↑ ↓"),
+    ("Sets & logic", "∈ ∉ ⊂ ⊃ ⊆ ∪ ∩ ∅ ∀ ∃ ¬ ∧ ∨ ∴ ∵ ℕ ℤ ℚ ℝ ℂ"),
+    ("Units & misc", "° ℃ ℉ Ω µ Å ℓ ′ ″ ∠ ⊥ ∥ … ⋯ ℏ"),
+]
+
+MATH_HELP = r"""<b>Symbols</b> from the Σ menu work in any text.<br><br>
+<b>Math mode</b> (tick “Math”) understands:<br>
+<code>x^2</code>, <code>x^10</code>, <code>x^{n+1}</code> — powers<br>
+<code>H_2O</code>, <code>a_{ij}</code> — subscripts<br>
+<code>\sqrt{2}</code>, <code>\sqrt[3]{x}</code> — roots<br>
+<code>\frac{1}{2}</code> — fractions<br>
+<code>\pi \pm \times \div \le \ge \ne \approx \infty \deg \sum \int \Delta \Omega \mu</code> … — named symbols<br><br>
+Use <code>\^ \_ \{ \} \\</code> for the literal characters."""
+
+
+class MathSymbolButton(QToolButton):
+    """“Σ” button whose menu inserts math symbols and templates."""
+
+    insertRequested = QtCore.pyqtSignal(str, int, bool, name="insertRequested")
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setText("Σ")
+        self.setToolTip("Insert a math symbol or formula")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setStyleSheet("QToolButton { font-size: 12pt; padding: 0 8px; }")
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        menu = QMenu(self)
+        for label, text, back, math in MATH_TEMPLATES:
+            act = menu.addAction(label)
+            assert act is not None
+            act.triggered.connect(
+                lambda _=False, t=text, b=back, m=math: self.insertRequested.emit(
+                    t, b, m
+                )
+            )
+        menu.addSeparator()
+        for title, symbols in MATH_SYMBOL_GROUPS:
+            sub = menu.addMenu(title)
+            assert sub is not None
+            for symbol in symbols.split():
+                act = sub.addAction(symbol)
+                assert act is not None
+                act.triggered.connect(
+                    lambda _=False, t=symbol: self.insertRequested.emit(t, 0, False)
+                )
+        menu.addSeparator()
+        help_act = menu.addAction("Math syntax help…")
+        assert help_act is not None
+        help_act.triggered.connect(
+            lambda: QMessageBox.information(self, "Math in labels", MATH_HELP)
+        )
+        self.setMenu(menu)
+
+
 class BaseLabelWidget(QWidget):
     """A base class for creating Dymo label widgets.
 
@@ -200,7 +275,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
 
         default_label_text = "." if is_dev_mode_no_margins() else "text"
         self.label = QPlainTextEdit(default_label_text)
-        self.label.setFixedHeight(15 * (len(self.label.toPlainText().splitlines()) + 2))
+        self.label.setFixedHeight(max(52, 15 * (len(self.label.toPlainText().splitlines()) + 2)))
         self.setFixedHeight(self.label.height() + _OPTIONS_ROW_HEIGHT)
         self.font_style = FontStyle()
         self.font_size = QSpinBox()
@@ -210,6 +285,13 @@ class TextDymoLabelWidget(BaseLabelWidget):
         self.font_size.setValue(90)
         self.frame_width_px = QSpinBox()
         self.align = QComboBox()
+        self.math = QCheckBox("Math")
+        self.math.setToolTip(
+            "Interpret x^2, H_2O, \\sqrt{x}, \\frac{a}{b}, \\pi … "
+            "(see Σ → Math syntax help)"
+        )
+        self.symbol_button = MathSymbolButton()
+        self.symbol_button.insertRequested.connect(self._insert_math)
 
         self.align.addItems(["left", "center", "right"])
 
@@ -228,11 +310,21 @@ class TextDymoLabelWidget(BaseLabelWidget):
             options.addWidget(_muted_label(text))
             options.addWidget(widget)
         options.addStretch(1)
+        for spin in (self.font_size, self.frame_width_px):
+            spin.setMaximumWidth(80)
         self.font_size.setSuffix(" %")
         self.frame_width_px.setSuffix(" px")
         body = QVBoxLayout()
         body.setSpacing(4)
-        body.addWidget(self.label)
+        top = QHBoxLayout()
+        top.addWidget(self.label, 1)
+        math_tools = QVBoxLayout()
+        math_tools.setSpacing(2)
+        math_tools.addWidget(self.symbol_button)
+        math_tools.addWidget(self.math)
+        math_tools.addStretch(1)
+        top.addLayout(math_tools)
+        body.addLayout(top)
         body.addLayout(options)
         layout.addWidget(item_icon, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
         layout.addLayout(body, 1)
@@ -241,9 +333,22 @@ class TextDymoLabelWidget(BaseLabelWidget):
         self.font_size.valueChanged.connect(self.content_changed)
         self.font_style.currentTextChanged.connect(self.content_changed)
         self.align.currentTextChanged.connect(self.content_changed)
+        self.math.stateChanged.connect(self.content_changed)
         self.setLayout(layout)
 
     kind = "text"
+
+    def _insert_math(self, text: str, cursor_back: int, needs_math: bool) -> None:
+        cursor = self.label.textCursor()
+        cursor.insertText(text)
+        if cursor_back:
+            cursor.movePosition(
+                cursor.MoveOperation.Left, cursor.MoveMode.MoveAnchor, cursor_back
+            )
+        self.label.setTextCursor(cursor)
+        if needs_math and not self.math.isChecked():
+            self.math.setChecked(True)
+        self.label.setFocus()
 
     def get_state(self) -> dict[str, Any]:
         return {
@@ -252,6 +357,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
             "font_size": self.font_size.value(),
             "frame_width_px": self.frame_width_px.value(),
             "align": self.align.currentText(),
+            "math": self.math.isChecked(),
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
@@ -260,6 +366,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         _set_spin(self.font_size, state.get("font_size", 90))
         _set_spin(self.frame_width_px, state.get("frame_width_px", 0))
         _set_combo_text(self.align, state.get("align"))
+        self.math.setChecked(bool(state.get("math", False)))
 
     def content_changed(self) -> None:
         """Manage changes to the label contents.
@@ -267,7 +374,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         In particular, update the height of the label and emit the itemRenderSignal
         when the content of the label changes.
         """
-        self.label.setFixedHeight(15 * (len(self.label.toPlainText().splitlines()) + 2))
+        self.label.setFixedHeight(max(52, 15 * (len(self.label.toPlainText().splitlines()) + 2)))
         self.setFixedHeight(self.label.height() + _OPTIONS_ROW_HEIGHT)
         self.itemRenderSignal.emit()
 
@@ -287,6 +394,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
             frame_width_px=self.frame_width_px.value(),
             font_size_ratio=self.font_size.value() / 100.0,
             align=selected_alignment,
+            math=self.math.isChecked(),
         )
 
 

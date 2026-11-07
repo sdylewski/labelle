@@ -238,6 +238,15 @@ def default(
         int | None,
         typer.Option(help="Tape size [mm]", rich_help_panel="Device Configuration"),
     ] = None,
+    math: Annotated[
+        bool,
+        typer.Option(
+            "--math",
+            help="Interpret math markup in text: x^2, H_2O, \\sqrt{x}, "
+            "\\frac{a}{b}, \\pi, \\pm, ...",
+            rich_help_panel="Design",
+        ),
+    ] = False,
     lead_in_mm: Annotated[
         float | None,
         typer.Option(
@@ -502,6 +511,7 @@ def default(
                 frame_width_px=frame_width_px,
                 font_size_ratio=int(font_scale) / 100.0,
                 align=align,
+                math=math,
             )
         )
 
