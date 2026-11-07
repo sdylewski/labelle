@@ -1,18 +1,18 @@
+from __future__ import annotations
+
 import logging
+from typing import Any
 
 from PIL import Image
-from PyQt6 import QtCore
+from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, QMenu
 
 from labelle.gui.common import crash_msg_box
 from labelle.gui.q_label_widgets import (
-    BarcodeDymoLabelWidget,
+    LABEL_WIDGET_CLASSES,
     BaseLabelWidget,
     EmptyRenderEngine,
-    ImageDymoLabelWidget,
-    QrDymoLabelWidget,
-    TextDymoLabelWidget,
 )
 from labelle.lib.constants import Direction
 from labelle.lib.devices.dymo_labeler import DymoLabeler
@@ -73,6 +73,8 @@ class QLabelList(QListWidget):
     renderPrintPayloadSignal = QtCore.pyqtSignal(
         Image.Image, name="renderPrintPayloadSignal"
     )
+    # Emitted whenever the user edits, adds, removes or reorders elements
+    contentChangedSignal = QtCore.pyqtSignal(name="contentChangedSignal")
     render_context: RenderContext | None
     dymo_labeler: DymoLabeler | None
     h_margin_mm: float
@@ -87,16 +89,74 @@ class QLabelList(QListWidget):
         self.justify = Direction.CENTER
         self.render_context = None
         self.setAlternatingRowColors(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setResizeMode(QtWidgets.QListView.ResizeMode.Adjust)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
 
     def populate(self) -> None:
+        self.add_element("text")
+
+    def add_element(
+        self, kind: str, state: dict[str, Any] | None = None
+    ) -> BaseLabelWidget | None:
+        """Append a new element of the given kind ("text", "qr", ...)."""
         assert self.render_context is not None
-        for item_widget in [TextDymoLabelWidget(self.render_context)]:
-            item = QListWidgetItem(self)
-            item.setSizeHint(item_widget.sizeHint())
-            self.addItem(item)
-            self.setItemWidget(item, item_widget)
-            item_widget.itemRenderSignal.connect(self.render_label)
+        widget_cls = LABEL_WIDGET_CLASSES.get(kind)
+        if widget_cls is None:
+            LOG.warning(f"Unknown label element kind {kind!r}, skipping")
+            return None
+        item_widget = widget_cls(self.render_context)
+        if state:
+            item_widget.set_state(state)
+        item = QListWidgetItem(self)
+        item.setSizeHint(item_widget.sizeHint())
+        self.addItem(item)
+        self.setItemWidget(item, item_widget)
+        item_widget.itemRenderSignal.connect(self._on_item_changed)
+        self.setCurrentItem(item)
+        return item_widget
+
+    def _on_item_changed(self) -> None:
+        self.render_label()
+        self.contentChangedSignal.emit()
+
+    def remove_selected(self) -> None:
+        row = self.currentRow()
+        if row >= 0:
+            self.takeItem(row)
+            self.render_label()
+            self.contentChangedSignal.emit()
+
+    def get_elements(self) -> list[dict[str, Any]]:
+        """Return all elements, in order, as JSON-serializable dicts."""
+        elements = []
+        for i in range(self.count()):
+            item_widget = self.itemWidget(self.item(i))
+            if isinstance(item_widget, BaseLabelWidget):
+                elements.append({"kind": item_widget.kind, **item_widget.get_state()})
+        return elements
+
+    def set_elements(self, elements: list[dict[str, Any]]) -> None:
+        """Replace all elements with the given ones."""
+        self.blockSignals(True)
+        try:
+            self.clear()
+            for element in elements:
+                state = dict(element)
+                kind = state.pop("kind", "text")
+                self.add_element(kind, state)
+        finally:
+            self.blockSignals(False)
+        self.render_label()
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() == QtCore.Qt.Key.Key_Delete and not isinstance(
+            self.focusWidget(), (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit)
+        ):
+            self.remove_selected()
+            return
+        super().keyPressEvent(e)
 
     def dropEvent(self, e) -> None:
         """Override the default drop event to update the label rendering.
@@ -108,6 +168,7 @@ class QLabelList(QListWidget):
         """
         super().dropEvent(e)
         self.render_label()
+        self.contentChangedSignal.emit()
 
     def update_params(
         self,
@@ -212,41 +273,13 @@ class QLabelList(QListWidget):
         delete: QAction | None = contextMenu.addAction("Delete")
         menu_click = contextMenu.exec(event.globalPos())
 
-        if menu_click == add_text:
-            item = QListWidgetItem(self)
-            text_item_widget = TextDymoLabelWidget(self.render_context)
-            item.setSizeHint(text_item_widget.sizeHint())
-            self.addItem(item)
-            self.setItemWidget(item, text_item_widget)
-            text_item_widget.itemRenderSignal.connect(self.render_label)
-
-        if menu_click == add_qr:
-            item = QListWidgetItem(self)
-            qr_item_widget = QrDymoLabelWidget(self.render_context)
-            item.setSizeHint(qr_item_widget.sizeHint())
-            self.addItem(item)
-            self.setItemWidget(item, qr_item_widget)
-            qr_item_widget.itemRenderSignal.connect(self.render_label)
-
-        if menu_click == add_barcode:
-            item = QListWidgetItem(self)
-            barcode_item_widget = BarcodeDymoLabelWidget(self.render_context)
-            item.setSizeHint(barcode_item_widget.sizeHint())
-            self.addItem(item)
-            self.setItemWidget(item, barcode_item_widget)
-            barcode_item_widget.itemRenderSignal.connect(self.render_label)
-
-        if menu_click == add_img:
-            item = QListWidgetItem(self)
-            image_item_widget = ImageDymoLabelWidget(self.render_context)
-            item.setSizeHint(image_item_widget.sizeHint())
-            self.addItem(item)
-            self.setItemWidget(item, image_item_widget)
-            image_item_widget.itemRenderSignal.connect(self.render_label)
-        if menu_click == delete:
-            try:
-                item_to_delete = self.itemAt(event.pos())
-                self.takeItem(self.indexFromItem(item_to_delete).row())  # self.update()
-            except Exception as e:  # noqa: BLE001
-                LOG.warning(f"No item selected {e}")
+        kinds = {add_text: "text", add_qr: "qr", add_barcode: "barcode", add_img: "image"}
+        if menu_click in kinds:
+            self.add_element(kinds[menu_click])
+            self.contentChangedSignal.emit()
+        elif menu_click == delete:
+            item_to_delete = self.itemAt(event.pos())
+            if item_to_delete is not None:
+                self.takeItem(self.row(item_to_delete))
+                self.contentChangedSignal.emit()
         self.render_label()

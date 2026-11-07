@@ -10,6 +10,7 @@ from __future__ import annotations
 import array
 import logging
 import math
+import os
 
 import usb
 from PIL import Image
@@ -242,6 +243,9 @@ class DymoLabeler:
     LABELER_PRINT_HEAD_HEIGHT_MM = 8.2
     SUPPORTED_TAPE_SIZES_MM = (19, 12, 9, 6)
     DEFAULT_TAPE_SIZE_MM = 12
+    # Blank tape fed before the payload so the first printed column isn't burned
+    # while the tape motor is still spinning up (faded/missing first character).
+    DEFAULT_LEAD_IN_MM = 2.0
 
     def __init__(
         self,
@@ -257,6 +261,18 @@ class DymoLabeler:
             )
         self.tape_size_mm = tape_size_mm
         self._device = device
+        self.lead_in_mm = self._lead_in_mm_from_env()
+
+    @classmethod
+    def _lead_in_mm_from_env(cls) -> float:
+        value = os.environ.get("LABELLE_LEAD_IN_MM")
+        if value is None:
+            return cls.DEFAULT_LEAD_IN_MM
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            LOG.warning(f"Ignoring invalid LABELLE_LEAD_IN_MM={value!r}")
+            return cls.DEFAULT_LEAD_IN_MM
 
     @property
     def height_px(self):
@@ -337,6 +353,12 @@ class DymoLabeler:
         label_matrix: list[list[int]] = [
             array.array("B", label_row).tolist() for label_row in label_rows
         ]
+
+        lead_in_lines = max(0, round(mm_to_px(self.lead_in_mm)))
+        LOG.debug(f"Prepending {lead_in_lines} blank lead-in lines ({self.lead_in_mm}mm)")
+        label_matrix = [
+            [0] * stream_row_length for _ in range(lead_in_lines)
+        ] + label_matrix
 
         try:
             LOG.debug("Printing label..")

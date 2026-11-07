@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from PyQt6 import QtCore
 from PyQt6.QtGui import (
@@ -20,6 +21,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -56,6 +58,10 @@ class FontStyle(QComboBox):
             fonts_model.appendRow(item)
 
         self.setModel(fonts_model)
+        self.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.setMinimumContentsLength(12)
 
         # Select default font
         self.setCurrentText("Carlito-Regular")
@@ -91,6 +97,30 @@ class FontStyle(QComboBox):
         return item
 
 
+_OPTIONS_ROW_HEIGHT = 50
+
+
+def _muted_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("muted")
+    return label
+
+
+def _set_combo_text(combo: QComboBox, text: Any) -> None:
+    if text is None:
+        return
+    index = combo.findText(str(text))
+    if index >= 0:
+        combo.setCurrentIndex(index)
+
+
+def _set_spin(spin: QSpinBox, value: Any) -> None:
+    try:
+        spin.setValue(int(value))
+    except (TypeError, ValueError):
+        pass
+
+
 class BaseLabelWidget(QWidget):
     """A base class for creating Dymo label widgets.
 
@@ -109,8 +139,16 @@ class BaseLabelWidget(QWidget):
     """
 
     render_context: RenderContext
+    kind: str = "base"
 
     itemRenderSignal = QtCore.pyqtSignal(name="itemRenderSignal")
+
+    def get_state(self) -> dict[str, Any]:
+        """Return a JSON-serializable description of this element."""
+        return {}
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        """Restore this element from a dict produced by get_state()."""
 
     def content_changed(self) -> None:
         """Emit the itemRenderSignal when the content of the label is changed."""
@@ -163,7 +201,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         default_label_text = "." if is_dev_mode_no_margins() else "text"
         self.label = QPlainTextEdit(default_label_text)
         self.label.setFixedHeight(15 * (len(self.label.toPlainText().splitlines()) + 2))
-        self.setFixedHeight(self.label.height() + 10)
+        self.setFixedHeight(self.label.height() + _OPTIONS_ROW_HEIGHT)
         self.font_style = FontStyle()
         self.font_size = QSpinBox()
         self.font_size.setMaximum(150)
@@ -176,25 +214,52 @@ class TextDymoLabelWidget(BaseLabelWidget):
         self.align.addItems(["left", "center", "right"])
 
         layout = QHBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
         item_icon = QLabel()
         item_icon.setPixmap(QIcon(str(ICON_DIR / "txt_icon.png")).pixmap(32, 32))
         item_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(item_icon)
-        layout.addWidget(self.label)
-        layout.addWidget(QLabel("Font:"))
-        layout.addWidget(self.font_style)
-        layout.addWidget(QLabel("Size [%]:"))
-        layout.addWidget(self.font_size)
-        layout.addWidget(QLabel("Frame Width:"))
-        layout.addWidget(self.frame_width_px)
-        layout.addWidget(QLabel("Alignment:"))
-        layout.addWidget(self.align)
+        options = QHBoxLayout()
+        for text, widget in (
+            ("Font", self.font_style),
+            ("Size", self.font_size),
+            ("Frame", self.frame_width_px),
+            ("Align", self.align),
+        ):
+            options.addWidget(_muted_label(text))
+            options.addWidget(widget)
+        options.addStretch(1)
+        self.font_size.setSuffix(" %")
+        self.frame_width_px.setSuffix(" px")
+        body = QVBoxLayout()
+        body.setSpacing(4)
+        body.addWidget(self.label)
+        body.addLayout(options)
+        layout.addWidget(item_icon, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(body, 1)
         self.label.textChanged.connect(self.content_changed)
         self.frame_width_px.valueChanged.connect(self.content_changed)
         self.font_size.valueChanged.connect(self.content_changed)
         self.font_style.currentTextChanged.connect(self.content_changed)
         self.align.currentTextChanged.connect(self.content_changed)
         self.setLayout(layout)
+
+    kind = "text"
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "text": self.label.toPlainText(),
+            "font": self.font_style.currentText(),
+            "font_size": self.font_size.value(),
+            "frame_width_px": self.frame_width_px.value(),
+            "align": self.align.currentText(),
+        }
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self.label.setPlainText(str(state.get("text", "")))
+        _set_combo_text(self.font_style, state.get("font"))
+        _set_spin(self.font_size, state.get("font_size", 90))
+        _set_spin(self.frame_width_px, state.get("frame_width_px", 0))
+        _set_combo_text(self.align, state.get("align"))
 
     def content_changed(self) -> None:
         """Manage changes to the label contents.
@@ -203,7 +268,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         when the content of the label changes.
         """
         self.label.setFixedHeight(15 * (len(self.label.toPlainText().splitlines()) + 2))
-        self.setFixedHeight(self.label.height() + 10)
+        self.setFixedHeight(self.label.height() + _OPTIONS_ROW_HEIGHT)
         self.itemRenderSignal.emit()
 
     @property
@@ -250,14 +315,24 @@ class QrDymoLabelWidget(BaseLabelWidget):
         self.render_context = render_context
 
         self.label = QLineEdit("")
+        self.label.setPlaceholderText("QR code content (URL, text…)")
         layout = QHBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
         item_icon = QLabel()
         item_icon.setPixmap(QIcon(str(ICON_DIR / "qr_icon.png")).pixmap(32, 32))
         item_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(item_icon)
-        layout.addWidget(self.label)
+        layout.addWidget(self.label, 1)
         self.label.textChanged.connect(self.content_changed)
         self.setLayout(layout)
+
+    kind = "qr"
+
+    def get_state(self) -> dict[str, Any]:
+        return {"text": self.label.text()}
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self.label.setText(str(state.get("text", "")))
 
     @property
     def render_engine_impl(self):
@@ -347,7 +422,9 @@ class BarcodeDymoLabelWidget(BaseLabelWidget):
         self.set_text_fields_visibility(True)
 
         layout = QHBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
 
+        self.label.setPlaceholderText("Barcode content")
         self.barcode_type_label = QLabel("Type:")
         self.barcode_type = QComboBox()
         self.barcode_type.addItems(bt.value for bt in BarcodeType)
@@ -360,20 +437,37 @@ class BarcodeDymoLabelWidget(BaseLabelWidget):
             self.toggle_text_fields_and_rerender
         )
 
-        layout.addWidget(self.item_icon)
-        layout.addWidget(self.label)
-        layout.addWidget(self.barcode_type_label)
-        layout.addWidget(self.barcode_type)
-        layout.addWidget(self.show_text_label)
-        layout.addWidget(self.show_text_checkbox)
-        layout.addWidget(self.font_label)
-        layout.addWidget(self.font_style)
-        layout.addWidget(self.size_label)
-        layout.addWidget(self.font_size)
-        layout.addWidget(self.frame_label)
-        layout.addWidget(self.frame_width_px)
-        layout.addWidget(self.align_label)
-        layout.addWidget(self.align)
+        self.show_text_checkbox.setText("Show text")
+        self.show_text_label.setVisible(False)
+        self.font_size.setSuffix(" %")
+        self.frame_width_px.setSuffix(" px")
+        for lbl, text in (
+            (self.barcode_type_label, "Type"),
+            (self.font_label, "Font"),
+            (self.size_label, "Size"),
+            (self.frame_label, "Frame"),
+            (self.align_label, "Align"),
+        ):
+            lbl.setText(text)
+            lbl.setObjectName("muted")
+        top = QHBoxLayout()
+        top.addWidget(self.label, 1)
+        top.addWidget(self.barcode_type_label)
+        top.addWidget(self.barcode_type)
+        top.addWidget(self.show_text_checkbox)
+        options = QHBoxLayout()
+        for widget in (
+            self.font_label, self.font_style, self.size_label, self.font_size,
+            self.frame_label, self.frame_width_px, self.align_label, self.align,
+        ):
+            options.addWidget(widget)
+        options.addStretch(1)
+        body = QVBoxLayout()
+        body.setSpacing(4)
+        body.addLayout(top)
+        body.addLayout(options)
+        layout.addWidget(self.item_icon, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(body, 1)
 
         self.label.textChanged.connect(self.content_changed)
         self.frame_width_px.valueChanged.connect(self.content_changed)
@@ -383,6 +477,28 @@ class BarcodeDymoLabelWidget(BaseLabelWidget):
         self.barcode_type.currentTextChanged.connect(self.content_changed)
 
         self.setLayout(layout)
+
+    kind = "barcode"
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "text": self.label.text(),
+            "barcode_type": self.barcode_type.currentText(),
+            "show_text": self.show_text_checkbox.isChecked(),
+            "font": self.font_style.currentText(),
+            "font_size": self.font_size.value(),
+            "frame_width_px": self.frame_width_px.value(),
+            "align": self.align.currentText(),
+        }
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self.label.setText(str(state.get("text", "")))
+        _set_combo_text(self.barcode_type, state.get("barcode_type"))
+        self.show_text_checkbox.setChecked(bool(state.get("show_text", True)))
+        _set_combo_text(self.font_style, state.get("font"))
+        _set_spin(self.font_size, state.get("font_size", 90))
+        _set_spin(self.frame_width_px, state.get("frame_width_px", 0))
+        _set_combo_text(self.align, state.get("align"))
 
     def set_text_fields_visibility(self, visible):
         self.font_label.setVisible(visible)
@@ -460,24 +576,36 @@ class ImageDymoLabelWidget(BaseLabelWidget):
 
         self.label = QLineEdit("")
         layout = QHBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
         item_icon = QLabel()
+        self.label.setPlaceholderText("Path to an image file")
         item_icon.setPixmap(QIcon(str(ICON_DIR / "img_icon.png")).pixmap(32, 32))
         item_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
 
-        button = QPushButton("Select file")
-        file_dialog = QFileDialog()
-        button.clicked.connect(
-            lambda: self.label.setText(
-                str(Path(file_dialog.getOpenFileName()[0]).absolute())
-            )
-        )
+        button = QPushButton("Browse…")
+        button.clicked.connect(self._choose_file)
 
         layout.addWidget(item_icon)
-        layout.addWidget(self.label)
+        layout.addWidget(self.label, 1)
         layout.addWidget(button)
 
         self.label.textChanged.connect(self.content_changed)
         self.setLayout(layout)
+
+    kind = "image"
+
+    def _choose_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.svg);;All files (*)"
+        )
+        if path:
+            self.label.setText(str(Path(path).absolute()))
+
+    def get_state(self) -> dict[str, Any]:
+        return {"path": self.label.text()}
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self.label.setText(str(state.get("path", "")))
 
     @property
     def render_engine_impl(self):
@@ -492,3 +620,14 @@ class ImageDymoLabelWidget(BaseLabelWidget):
             return PictureRenderEngine(picture_path=self.label.text())
         except PicturePathDoesNotExist:
             return EmptyRenderEngine()
+
+
+LABEL_WIDGET_CLASSES: dict[str, type[BaseLabelWidget]] = {
+    cls.kind: cls
+    for cls in (
+        TextDymoLabelWidget,
+        QrDymoLabelWidget,
+        BarcodeDymoLabelWidget,
+        ImageDymoLabelWidget,
+    )
+}

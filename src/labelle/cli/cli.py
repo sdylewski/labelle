@@ -238,6 +238,14 @@ def default(
         int | None,
         typer.Option(help="Tape size [mm]", rich_help_panel="Device Configuration"),
     ] = None,
+    lead_in_mm: Annotated[
+        float | None,
+        typer.Option(
+            help="Blank tape fed before printing, avoids a faded first character "
+            "[mm] (default 2, or $LABELLE_LEAD_IN_MM)",
+            rich_help_panel="Device Configuration",
+        ),
+    ] = None,
     # Old dymoprint arguments
     preview: Annotated[
         bool,
@@ -588,6 +596,8 @@ def default(
         device = None
 
     dymo_labeler = DymoLabeler(tape_size_mm=tape_size_mm, device=device)
+    if lead_in_mm is not None:
+        dymo_labeler.lead_in_mm = max(0.0, lead_in_mm)
     if not render_engines:
         raise typer.BadParameter("No elements to print")
     render_engine = HorizontallyCombinedRenderEngine(render_engines)
