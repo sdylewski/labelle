@@ -28,7 +28,13 @@ run_as_user() {
 echo "Installing labelle from $SRC_DIR for user $TARGET_USER ..."
 run_as_user pipx install --force "$SRC_DIR"
 
+echo "Installing desktop launcher and icon ..."
+VENVS="$(run_as_user pipx environment --value PIPX_LOCAL_VENVS)"
+run_as_user "$VENVS/labelle/bin/python" "$SRC_DIR/scripts/install_desktop.py"
+
 echo
 run_as_user labelle --version || true
 echo "Done. Start the GUI with: labelle-gui"
+echo "Labelle is also in your app grid; right-click it in the dock → Pin to Dash."
 echo "To go back to the stock release: pipx install --force labelle"
+echo "  (and remove the launcher: python3 $SRC_DIR/scripts/install_desktop.py --uninstall)"
