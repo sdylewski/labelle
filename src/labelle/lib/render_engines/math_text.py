@@ -7,6 +7,11 @@ Math markup (only when math mode is on):
     \\sqrt{x}                 square root with an overbar; \\sqrt[3]{x} for nth roots
     \\frac{a}{b}              stacked fraction
     \\pi \\pm \\le \\infty ...   named symbols (see SYMBOLS)
+    \\text{...}  \\mathbf{...}   upright text / bold
+    \\bar{x} \\overline{AB} \\vec{v} \\hat{x} \\dot{x} \\tilde{x} \\underline{x}   accents
+    \\left( ... \\right)     delimiters (drawn at normal size)
+    \\sin \\log \\lim ...      function names
+    \\, \\; \\quad           spacing
     \\^  \\_  \\{  \\}  \\\\        literal characters
 
 Characters missing from the selected font are drawn with a fallback font
@@ -57,7 +62,34 @@ SYMBOLS: dict[str, str] = {
     "parallel": "∥", "permil": "‰", "ohm": "Ω", "micro": "µ", "hbar": "ℏ",
     "ell": "ℓ", "prime": "′", "dprime": "″", "cdots": "⋯", "ldots": "…",
     "sqrt": "√",  # only used when \sqrt has no argument
+    "dots": "…", "star": "⋆", "bullet": "•", "dagger": "†", "aleph": "ℵ",
+    "langle": "⟨", "rangle": "⟩", "lbrace": "{", "rbrace": "}", "vert": "|",
+    "Vert": "‖", "mid": "∣", "backslash": "\\", "lfloor": "⌊", "rfloor": "⌋",
+    "lceil": "⌈", "rceil": "⌉", "quad": "\u2003", "qquad": "\u2003\u2003",
+    "varphi": "ϕ", "vartheta": "ϑ", "varepsilon": "ϵ",
 }
+
+# Function names are printed as words: \sin x, \log_2 n, \lim_{x \to 0}
+for _fn in (
+    "sin cos tan cot sec csc arcsin arccos arctan sinh cosh tanh log ln lg exp "
+    "min max det gcd dim ker arg mod sup inf Pr"
+).split():
+    SYMBOLS[_fn] = _fn
+
+# Commands that take arguments (handled by the parser rather than SYMBOLS)
+TEXT_COMMANDS = {"text", "textrm", "mbox", "textit"}
+GROUP_COMMANDS = {"mathrm", "operatorname", "mathit", "mathsf", "displaystyle"}
+BOLD_COMMANDS = {"mathbf", "textbf", "boldsymbol", "bm"}
+ACCENT_COMMANDS = {
+    "overline", "bar", "underline", "vec", "overrightarrow", "hat", "widehat",
+    "tilde", "widetilde", "dot", "ddot",
+}
+STRUCTURE_COMMANDS = (
+    {"sqrt", "frac", "dfrac", "tfrac", "left", "right"}
+    | TEXT_COMMANDS | GROUP_COMMANDS | BOLD_COMMANDS | ACCENT_COMMANDS
+)
+KNOWN_COMMANDS = set(SYMBOLS) | STRUCTURE_COMMANDS
+_SPACING_ESCAPES = {",": "\u2009", ";": "\u2005", ":": "\u2005", "!": "", " ": " "}
 
 _SUP_SCALE = 0.62
 _STRUCT_SCALE = 0.72  # fraction parts and root index
@@ -151,7 +183,29 @@ class FontSet:
         return _font(path or self.primary, self.size)
 
     def scaled(self, factor: float) -> FontSet:
-        return FontSet(self.primary, round(self.size * factor))
+        fs = FontSet(self.primary, round(self.size * factor))
+        return fs
+
+    def bold(self) -> FontSet:
+        return FontSet(str(bold_variant(Path(self.primary))), self.size)
+
+
+def bold_variant(path: Path) -> Path:
+    """Best-effort bold sibling of a font file (Carlito-Regular -> Carlito-Bold)."""
+    stem = path.stem
+    if "bold" in stem.lower():
+        return path
+    candidates = [
+        stem.replace("Regular", "Bold"),
+        stem.replace("-Italic", "-BoldItalic"),
+        f"{stem}-Bold",
+        f"{stem}Bold",
+    ]
+    for c in candidates:
+        p = path.with_name(c + path.suffix)
+        if p != path and p.exists():
+            return p
+    return path
 
 
 def text_needs_fallback(text: str, font_path: str) -> bool:
@@ -217,7 +271,8 @@ class _Parser:
                 flush()
                 nodes.extend(inner)
             else:
-                buf.append(c)
+                # In math, a hyphen is a minus sign (as in LaTeX)
+                buf.append("−" if c == "-" else c)
                 self.i += 1
         flush()
         return nodes
@@ -237,6 +292,25 @@ class _Parser:
             return [self._command()]
         self.i += 1
         return [Node("text", c)]
+
+    def _raw_group(self) -> str:
+        """Read a {group} verbatim (for \\text{...})."""
+        if self._peek() != "{":
+            g = self._group()
+            return "".join(n.text for n in g or [])
+        depth = 0
+        start = self.i + 1
+        while self.i < len(self.s):
+            c = self.s[self.i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    self.i += 1
+                    return self.s[start : self.i - 1]
+            self.i += 1
+        return self.s[start:]
 
     def _script_argument(self) -> list[Node] | None:
         c = self._peek()
@@ -261,12 +335,38 @@ class _Parser:
             self.i += 1
         name = self.s[start : self.i]
         if not name:
-            # Escaped literal like \^ \_ \{ \} \\ or a lone trailing backslash
+            # Spacing (\, \; \! "\ "), escaped literal (\^ \_ \{ \} \\) or a
+            # lone trailing backslash
             ch = self._peek()
             if ch:
                 self.i += 1
-                return Node("text", ch)
+                return Node("text", _SPACING_ESCAPES.get(ch, ch))
             return Node("text", "\\")
+        if name in ("left", "right"):
+            while self._peek() == " ":
+                self.i += 1
+            ch = self._peek()
+            if ch == ".":
+                self.i += 1
+                return Node("text", "")
+            if ch == "\\":
+                return self._command()
+            if ch:
+                self.i += 1
+            return Node("text", ch)
+        if name in TEXT_COMMANDS:
+            return Node("text", self._raw_group())
+        if name in GROUP_COMMANDS:
+            arg = self._group()
+            return Node("group", children=arg or [])
+        if name in BOLD_COMMANDS:
+            arg = self._group()
+            return Node("bold", children=arg or [])
+        if name in ACCENT_COMMANDS:
+            arg = self._group()
+            if arg is None:
+                return Node("text", "\\" + name)
+            return Node("accent", text=name, children=arg)
         if name == "sqrt":
             index = None
             if self._peek() == "[":
@@ -278,7 +378,7 @@ class _Parser:
             if arg is None:
                 return Node("text", "√")
             return Node("sqrt", children=arg, extra=index or [])
-        if name == "frac":
+        if name in ("frac", "dfrac", "tfrac"):
             num = self._group()
             den = self._group() if num is not None else None
             if num is None or den is None:
@@ -314,13 +414,16 @@ def _shift(ops: list[tuple], dx: float, dy: float) -> list[tuple]:
         if op[0] == "text":
             _, x, y, text, path, size = op
             out.append(("text", x + dx, y + dy, text, path, size))
+        elif op[0] == "dot":
+            _, x, y, r = op
+            out.append(("dot", x + dx, y + dy, r))
         else:
             _, pts, width = op
             out.append(("line", [(x + dx, y + dy) for x, y in pts], width))
     return out
 
 
-def _layout_text(text: str, fonts: FontSet) -> Box:
+def _layout_text(text: str, fonts: FontSet, tight: bool = False) -> Box:
     ops = []
     x = 0.0
     run: list[str] = []
@@ -345,6 +448,15 @@ def _layout_text(text: str, fonts: FontSet) -> Box:
             ascent, descent = max(ascent, a), max(descent, d)
         run.append(ch)
     flush()
+    if tight and ops:
+        # Size by the actual ink, so stacked parts (fractions) stay compact.
+        top = bottom = 0.0
+        for op in ops:
+            _, ox, _, s_, path, size = op
+            left, t, right, b = _font(path, size).getbbox(s_, anchor="ls")
+            top, bottom = min(top, t), max(bottom, b)
+        xh = fonts.size * 0.5  # at least x-height, so "a" and "x" line up
+        return Box(x, max(-top, xh), max(bottom, 0.0), ops)
     # Use the primary font's metrics so mixed lines stay steady; fallback fonts
     # often have very tall line metrics.
     a, d = fonts.font().getmetrics()
@@ -363,7 +475,7 @@ def _hcat(boxes: list[Box]) -> Box:
     return Box(x, ascent, descent, ops)
 
 
-def layout_nodes(nodes: list[Node], fonts: FontSet) -> Box:
+def layout_nodes(nodes: list[Node], fonts: FontSet, tight: bool = False) -> Box:
     boxes: list[Box] = []
     size = fonts.size
     stroke = max(1, round(size * 0.06))
@@ -372,7 +484,7 @@ def layout_nodes(nodes: list[Node], fonts: FontSet) -> Box:
         node = nodes[i]
         i += 1
         if node.kind == "text":
-            boxes.append(_layout_text(node.text, fonts))
+            boxes.append(_layout_text(node.text, fonts, tight))
         elif node.kind in ("sup", "sub"):
             scripts = [node]
             # x_a^b / x^b_a: stack both scripts at the same position
@@ -382,7 +494,7 @@ def layout_nodes(nodes: list[Node], fonts: FontSet) -> Box:
             width = ascent = descent = 0.0
             ops: list[tuple] = []
             for script in scripts:
-                inner = layout_nodes(script.children, fonts.scaled(_SUP_SCALE))
+                inner = layout_nodes(script.children, fonts.scaled(_SUP_SCALE), tight)
                 dy = -size * 0.42 if script.kind == "sup" else size * 0.18
                 width = max(width, inner.width)
                 ascent = max(ascent, inner.ascent - dy)
@@ -391,8 +503,14 @@ def layout_nodes(nodes: list[Node], fonts: FontSet) -> Box:
             boxes.append(
                 Box(width + size * 0.03, max(0.0, ascent), max(0.0, descent), ops)
             )
+        elif node.kind == "group":
+            boxes.append(layout_nodes(node.children, fonts, tight))
+        elif node.kind == "bold":
+            boxes.append(layout_nodes(node.children, fonts.bold(), tight))
+        elif node.kind == "accent":
+            boxes.append(_layout_accent(node, fonts, stroke))
         elif node.kind == "sqrt":
-            inner = layout_nodes(node.children, fonts)
+            inner = layout_nodes(node.children, fonts, tight)
             pad = max(1.0, size * 0.08)
             top = -(inner.ascent + pad)
             bottom = inner.descent
@@ -418,8 +536,8 @@ def layout_nodes(nodes: list[Node], fonts: FontSet) -> Box:
             )
         elif node.kind == "frac":
             part_fonts = fonts.scaled(_STRUCT_SCALE)
-            num = layout_nodes(node.children, part_fonts)
-            den = layout_nodes(node.extra, part_fonts)
+            num = layout_nodes(node.children, part_fonts, tight=True)
+            den = layout_nodes(node.extra, part_fonts, tight=True)
             axis = -size * 0.28  # fraction bar height (math axis)
             gap = max(1.0, size * 0.06)
             width = max(num.width, den.width) + size * 0.2
@@ -441,6 +559,100 @@ def layout_nodes(nodes: list[Node], fonts: FontSet) -> Box:
     return _hcat(boxes)
 
 
+def _layout_accent(node: Node, fonts: FontSet, stroke: int) -> Box:
+    inner = layout_nodes(node.children, fonts)
+    size = fonts.size
+    w = inner.width
+    gap = max(1.0, size * 0.06)
+    a = max(2.0, size * 0.14)  # accent height
+    ops = list(inner.ops)
+    ascent, descent = inner.ascent, inner.descent
+    top = -inner.ascent - gap  # bottom edge of an over-accent
+    kind = node.text
+    if kind == "overline":
+        ops.append(("line", [(0, top), (w, top)], stroke))
+        ascent += gap + stroke
+    elif kind == "bar":
+        # Short accent bar (like LaTeX \bar): about one letter wide, centred
+        span = min(w, size * 0.45)
+        x0 = (w - span) / 2
+        ops.append(("line", [(x0, top), (x0 + span, top)], stroke))
+        ascent += gap + stroke
+    elif kind == "underline":
+        y = inner.descent + gap
+        ops.append(("line", [(0, y), (w, y)], stroke))
+        descent += gap + stroke
+    elif kind in ("vec", "overrightarrow"):
+        y = top - a * 0.5
+        ops.append(("line", [(0, y), (w, y)], stroke))
+        ops.append(("line", [(w - a, y - a * 0.5), (w, y), (w - a, y + a * 0.5)], stroke))
+        ascent += gap + a
+    elif kind in ("hat", "widehat"):
+        span = w if kind == "widehat" else min(w, size * 0.5)
+        x0 = (w - span) / 2
+        ops.append(("line", [(x0, top), (x0 + span / 2, top - a), (x0 + span, top)], stroke))
+        ascent += gap + a
+    elif kind in ("tilde", "widetilde"):
+        span = w if kind == "widetilde" else min(w, size * 0.5)
+        x0 = (w - span) / 2
+        pts = [
+            (x0 + span * t, top - a * 0.5 + a * 0.4 * (1 if i % 2 else -1))
+            for i, t in enumerate((0.0, 0.33, 0.67, 1.0))
+        ]
+        ops.append(("line", pts, stroke))
+        ascent += gap + a
+    elif kind in ("dot", "ddot"):
+        r = max(1.0, size * 0.05)
+        xs = [w / 2] if kind == "dot" else [w / 2 - r * 2.2, w / 2 + r * 2.2]
+        for x in xs:
+            ops.append(("dot", x, top - r, r))
+        ascent += gap + 2 * r
+    return Box(w, ascent, descent, ops)
+
+
+def check_math(src: str) -> list[str]:
+    """Return human-readable problems with math markup (empty if fine)."""
+    problems: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(src):
+        c = src[i]
+        if c == "\\":
+            j = i + 1
+            while j < len(src) and src[j].isalpha():
+                j += 1
+            name = src[i + 1 : j]
+            if name and name not in KNOWN_COMMANDS:
+                problems.append(f"Unknown command \\{name} (shown as typed)")
+            i = j if name else i + 2
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth < 0:
+                problems.append("Unmatched } ")
+                depth = 0
+        elif c in "^_" and (i + 1 >= len(src) or src[i + 1].isspace()):
+            what = "exponent" if c == "^" else "subscript"
+            problems.append(f"{c} needs an {what} after it, e.g. x{c}2 or x{c}{{n+1}}")
+        i += 1
+    if depth > 0:
+        problems.append(f"Missing {depth} closing brace{'s' if depth > 1 else ''} }}")
+    for line in src.splitlines() or [src]:
+        for node in _iter_nodes(parse_math(line)):
+            if node.kind == "text" and "\\frac" in node.text:
+                problems.append("\\frac needs two groups: \\frac{top}{bottom}")
+    return list(dict.fromkeys(problems))
+
+
+def _iter_nodes(nodes: list[Node]):
+    for n in nodes:
+        yield n
+        yield from _iter_nodes(n.children)
+        yield from _iter_nodes(n.extra)
+
+
 def layout_line(line: str, font_path: str, size: int, math: bool) -> Box:
     fonts = FontSet(font_path, size)
     nodes = parse_math(line) if math else [Node("text", line)]
@@ -458,6 +670,10 @@ def draw_box(draw: ImageDraw.ImageDraw, box: Box, x: float, baseline: float) -> 
                 anchor="ls",
                 fill=1,
             )
+        elif op[0] == "dot":
+            _, ox, oy, r = op
+            cx, cy = x + ox, baseline + oy
+            draw.ellipse((round(cx - r), round(cy - r), round(cx + r), round(cy + r)), fill=1)
         else:
             _, pts, width = op
             draw.line(

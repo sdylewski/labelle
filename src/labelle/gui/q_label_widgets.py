@@ -160,6 +160,7 @@ class MathSymbolButton(QToolButton):
     """“Σ” button whose menu inserts math symbols and templates."""
 
     insertRequested = QtCore.pyqtSignal(str, int, bool, name="insertRequested")
+    editorRequested = QtCore.pyqtSignal(name="editorRequested")
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -169,6 +170,10 @@ class MathSymbolButton(QToolButton):
         self.setStyleSheet("QToolButton { font-size: 12pt; padding: 0 8px; }")
         self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         menu = QMenu(self)
+        editor_act = menu.addAction("Equation Editor…")
+        assert editor_act is not None
+        editor_act.triggered.connect(self.editorRequested.emit)
+        menu.addSeparator()
         for label, text, back, math in MATH_TEMPLATES:
             act = menu.addAction(label)
             assert act is not None
@@ -292,6 +297,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         )
         self.symbol_button = MathSymbolButton()
         self.symbol_button.insertRequested.connect(self._insert_math)
+        self.symbol_button.editorRequested.connect(self.open_equation_editor)
 
         self.align.addItems(["left", "center", "right"])
 
@@ -300,6 +306,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         item_icon = QLabel()
         item_icon.setPixmap(QIcon(str(ICON_DIR / "txt_icon.png")).pixmap(32, 32))
         item_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.item_icon = item_icon
         options = QHBoxLayout()
         for text, widget in (
             ("Font", self.font_style),
@@ -319,6 +326,7 @@ class TextDymoLabelWidget(BaseLabelWidget):
         top = QHBoxLayout()
         top.addWidget(self.label, 1)
         math_tools = QVBoxLayout()
+        self.math_tools = math_tools
         math_tools.setSpacing(2)
         math_tools.addWidget(self.symbol_button)
         math_tools.addWidget(self.math)
@@ -337,6 +345,24 @@ class TextDymoLabelWidget(BaseLabelWidget):
         self.setLayout(layout)
 
     kind = "text"
+
+    def open_equation_editor(self) -> bool:
+        """Edit this element's text in the equation editor. True if accepted."""
+        from labelle.gui.q_equation_editor import EquationEditorDialog
+
+        dialog = EquationEditorDialog(
+            source=self.label.toPlainText(),
+            font_path=str(self.font_style.currentData()),
+            font_size_ratio=self.font_size.value() / 100.0,
+            height_px=self.render_context.height_px,
+            align=Direction(self.align.currentText()),
+            parent=self.window(),
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return False
+        self.label.setPlainText(dialog.source())
+        self.math.setChecked(True)
+        return True
 
     def _insert_math(self, text: str, cursor_back: int, needs_math: bool) -> None:
         cursor = self.label.textCursor()
@@ -730,10 +756,43 @@ class ImageDymoLabelWidget(BaseLabelWidget):
             return EmptyRenderEngine()
 
 
+class EquationDymoLabelWidget(TextDymoLabelWidget):
+    """A text element that is always in math mode, edited with the equation editor."""
+
+    kind = "math"
+    DEFAULT_SOURCE = "x^2"
+
+    def __init__(self, render_context: RenderContext, parent: QWidget | None = None):
+        super().__init__(render_context, parent)
+        self.math.setChecked(True)
+        self.math.setVisible(False)
+        self.symbol_button.setVisible(False)
+        self.item_icon.setPixmap(QIcon(str(ICON_DIR / "math_icon.png")).pixmap(32, 32))
+        self.item_icon.setToolTip("Equation")
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        self.label.setFont(mono)
+        self.label.setToolTip("LaTeX-like source — click “Edit…” for the equation editor")
+        self.label.setPlainText(self.DEFAULT_SOURCE)
+        self.edit_button = QPushButton("Edit…")
+        self.edit_button.setToolTip("Open the equation editor")
+        self.edit_button.clicked.connect(self.open_equation_editor)
+        self.math_tools.insertWidget(0, self.edit_button)
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        super().set_state(state)
+        self.math.setChecked(True)
+
+    def get_state(self) -> dict[str, Any]:
+        state = super().get_state()
+        state.pop("math", None)
+        return state
+
+
 LABEL_WIDGET_CLASSES: dict[str, type[BaseLabelWidget]] = {
     cls.kind: cls
     for cls in (
         TextDymoLabelWidget,
+        EquationDymoLabelWidget,
         QrDymoLabelWidget,
         BarcodeDymoLabelWidget,
         ImageDymoLabelWidget,

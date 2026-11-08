@@ -75,6 +75,8 @@ class QLabelList(QListWidget):
     )
     # Emitted whenever the user edits, adds, removes or reorders elements
     contentChangedSignal = QtCore.pyqtSignal(name="contentChangedSignal")
+    # Emitted (with the row) when the user adds an element interactively
+    elementAddedSignal = QtCore.pyqtSignal(int, name="elementAddedSignal")
     render_context: RenderContext | None
     dymo_labeler: DymoLabeler | None
     h_margin_mm: float
@@ -267,16 +269,19 @@ class QLabelList(QListWidget):
         assert self.render_context is not None
         contextMenu = QMenu(self)
         add_text: QAction | None = contextMenu.addAction("Add Text")
+        add_math: QAction | None = contextMenu.addAction("Add Equation")
         add_qr: QAction | None = contextMenu.addAction("Add QR")
         add_barcode: QAction | None = contextMenu.addAction("Add Barcode")
         add_img: QAction | None = contextMenu.addAction("Add Image")
         delete: QAction | None = contextMenu.addAction("Delete")
         menu_click = contextMenu.exec(event.globalPos())
 
-        kinds = {add_text: "text", add_qr: "qr", add_barcode: "barcode", add_img: "image"}
+        kinds = {add_text: "text", add_math: "math", add_qr: "qr", add_barcode: "barcode", add_img: "image"}
         if menu_click in kinds:
             self.add_element(kinds[menu_click])
+            self.render_label()
             self.contentChangedSignal.emit()
+            self.elementAddedSignal.emit(self.count() - 1)
         elif menu_click == delete:
             item_to_delete = self.itemAt(event.pos())
             if item_to_delete is not None:

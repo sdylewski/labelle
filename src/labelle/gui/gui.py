@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -43,6 +45,7 @@ from labelle.gui.label_store import (
 )
 from labelle.gui.q_device_selector import QDeviceSelector
 from labelle.gui.q_label_library import QLabelLibrary
+from labelle.gui.q_label_widgets import EquationDymoLabelWidget
 from labelle.gui.q_labels_list import QLabelList
 from labelle.gui.q_render import QRender
 from labelle.gui.q_settings_toolbar import QSettingsToolbar, Settings
@@ -178,6 +181,11 @@ class LabelleWindow(QMainWindow):
             "Text", lambda: self._add_element("text"), "Ctrl+T",
             QIcon(str(ICON_DIR / "txt_icon.png")), "Add a text element (Ctrl+T)",
         )
+        self.act_add_math = self._action(
+            "Equation", lambda: self._add_element("math"), "Ctrl+E",
+            QIcon(str(ICON_DIR / "math_icon.png")),
+            "Add an equation, edited with the equation editor (Ctrl+E)",
+        )
         self.act_add_qr = self._action(
             "QR Code", lambda: self._add_element("qr"), "Ctrl+Shift+Q",
             QIcon(str(ICON_DIR / "qr_icon.png")), "Add a QR code",
@@ -228,8 +236,8 @@ class LabelleWindow(QMainWindow):
 
         insert_menu = bar.addMenu("&Insert")
         assert insert_menu is not None
-        for a in (self.act_add_text, self.act_add_qr, self.act_add_barcode,
-                  self.act_add_image, None, self.act_remove):
+        for a in (self.act_add_text, self.act_add_math, self.act_add_qr,
+                  self.act_add_barcode, self.act_add_image, None, self.act_remove):
             insert_menu.addSeparator() if a is None else insert_menu.addAction(a)
 
         self._view_menu = bar.addMenu("&View")
@@ -260,8 +268,8 @@ class LabelleWindow(QMainWindow):
         add_label = QLabel(" Add: ")
         add_label.setObjectName("muted")
         tb.addWidget(add_label)
-        for a in (self.act_add_text, self.act_add_qr, self.act_add_barcode,
-                  self.act_add_image):
+        for a in (self.act_add_text, self.act_add_math, self.act_add_qr,
+                  self.act_add_barcode, self.act_add_image):
             tb.addAction(a)
         tb.addSeparator()
         tb.addAction(self.act_remove)
@@ -396,6 +404,7 @@ class LabelleWindow(QMainWindow):
         self._label_list.renderPrintPreviewSignal.connect(self._update_preview_render)
         self._label_list.renderPrintPayloadSignal.connect(self._update_print_render)
         self._label_list.contentChangedSignal.connect(self._mark_dirty)
+        self._label_list.elementAddedSignal.connect(self._on_element_added)
         self._settings_panel.settings_changed_signal.connect(self._on_settings_changed)
         self._device_selector.selectedDeviceChangedSignal.connect(
             self._on_device_selected
@@ -690,6 +699,16 @@ class LabelleWindow(QMainWindow):
         self._mark_dirty()
         if widget is not None:
             widget.setFocus()
+            self._on_element_added(self._label_list.count() - 1)
+
+    def _on_element_added(self, row: int) -> None:
+        """New equations open straight in the editor; cancelling removes them."""
+        item = self._label_list.item(row)
+        widget = self._label_list.itemWidget(item) if item is not None else None
+        if isinstance(widget, EquationDymoLabelWidget):
+            if not widget.open_equation_editor():
+                self._label_list.takeItem(row)
+                self._label_list.render_label()
 
     def _on_settings_changed(self, settings: Settings) -> None:
         self._dymo_labeler.tape_size_mm = settings.tape_size_mm
@@ -795,15 +814,48 @@ def parse(app) -> None:
         set_not_verbose()
 
 
+_QUIET_QT_LOG_RULES = (
+    # Qt 6.12 on Wayland logs this on nearly every focus change; it is harmless.
+    "qt.qpa.wayland.textinput=false",
+)
+
+
+def _quiet_qt_logging() -> None:
+    if "-v" in sys.argv or "--verbose" in sys.argv or is_verbose_env_vars():
+        return
+    existing = os.environ.get("QT_LOGGING_RULES", "")
+    rules = [r for r in existing.split(";") if r]
+    rules += [r for r in _QUIET_QT_LOG_RULES if r not in rules]
+    os.environ["QT_LOGGING_RULES"] = ";".join(rules)
+
+
+def _install_sigint_handler(window: QMainWindow) -> QtCore.QTimer:
+    """Make Ctrl+C in the terminal close the window cleanly (saving the session)."""
+    signal.signal(
+        signal.SIGINT, lambda *_: QtCore.QTimer.singleShot(0, window.close)
+    )
+    # Qt's event loop doesn't run Python code on its own, so wake the
+    # interpreter regularly to let the signal handler run.
+    timer = QtCore.QTimer()
+    timer.timeout.connect(lambda: None)
+    timer.start(250)
+    return timer
+
+
 def main() -> None:
     configure_logging()
+    _quiet_qt_logging()
     with system_run():
+        # Set before the QApplication exists: Qt registers this app id with the
+        # desktop portal at startup (setting it later causes a second, failing
+        # registration). It must match labelle-gui.desktop for the dock icon.
+        QApplication.setDesktopFileName("labelle-gui")
+        QApplication.setApplicationName("Labelle")
         app = QApplication(sys.argv)
-        app.setApplicationName("Labelle")
-        app.setDesktopFileName("labelle-gui")
         parse(app)
         window = LabelleWindow()
         window.show()
+        _sigint_timer = _install_sigint_handler(window)  # noqa: F841 keep alive
         sys.exit(app.exec())
 
 
